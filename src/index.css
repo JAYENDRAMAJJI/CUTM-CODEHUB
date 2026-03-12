@@ -1,0 +1,18 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@layer base {
+	html,
+	body,
+	#root {
+		min-height: 100%;
+	}
+
+	html {
+		font-size: 18px;
+	}
+
+	body {
+		font-family: "Segoe UI", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+	}
+}
