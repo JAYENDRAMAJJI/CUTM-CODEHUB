@@ -113,6 +113,17 @@ type LegacyLeaderboardEntry = {
   penalties?: number;
 };
 
+type AnalyticsSnapshot = {
+  totalUsers: number;
+  totalProblems: number;
+  activeContests: number;
+  weeklyGrowth: string;
+  dailyActiveUsers: number;
+  solvedCount: number;
+  contestParticipation: number;
+  acceptanceRate: string;
+};
+
 const KEY_USERS = 'admin.users';
 const KEY_COURSES = 'admin.courses';
 const KEY_PROBLEMS = 'admin.problems';
@@ -125,6 +136,152 @@ const KEY_SETTINGS = 'admin.settings';
 const KEY_USER_ACTIVITY = 'admin.userActivity';
 const KEY_LEADERBOARD = 'admin.leaderboard';
 const KEY_SCORING_SYSTEM = 'admin.leaderboard.scoring';
+const KEY_ANALYTICS_CACHE = 'admin.analytics.cache';
+
+const API_BASE_URL = ((((import.meta as any).env?.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '')) || 'http://127.0.0.1:8080/api');
+let backendBootstrapStarted = false;
+
+async function requestFromBackend<T>(path: string, init?: RequestInit): Promise<T | null> {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(init?.headers || {}),
+      },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      return null;
+    }
+    if (response.status === 204) {
+      return null;
+    }
+    const text = await response.text();
+    if (!text) {
+      return null;
+    }
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+function fireAndForget(task: Promise<unknown>): void {
+  void task.catch(() => {
+    // Intentionally ignore background API sync failures.
+  });
+}
+
+function notifyDataRefreshed(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.dispatchEvent(new Event('storage'));
+}
+
+async function refreshUsersFromBackend(): Promise<void> {
+  const rows = await requestFromBackend<Array<{ id: string; name: string; email: string; role: string; status: string; joinedOn: string }>>('/admin/users');
+  if (!rows) return;
+
+  const normalized: AdminUser[] = rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    role: row.role === 'Admin' ? 'Admin' : 'Student',
+    status: row.status === 'Suspended' ? 'Suspended' : 'Active',
+    joinedOn: row.joinedOn,
+  }));
+
+  writeStore(KEY_USERS, normalized);
+}
+
+async function refreshCoursesFromBackend(): Promise<void> {
+  const rows = await requestFromBackend<Array<{ id: string; title: string; level: string; enrolled: number; status: string }>>('/admin/courses');
+  if (!rows) return;
+
+  const normalized: AdminCourse[] = rows.map((row) => ({
+    id: row.id,
+    title: row.title,
+    level: row.level === 'Advanced' || row.level === 'Intermediate' ? row.level : 'Beginner',
+    enrolled: Number.isFinite(row.enrolled) ? row.enrolled : 0,
+    status: row.status === 'Draft' ? 'Draft' : 'Published',
+    videos: [],
+    articles: [],
+  }));
+
+  writeStore(KEY_COURSES, normalized);
+}
+
+async function refreshProblemsFromBackend(): Promise<void> {
+  const rows = await requestFromBackend<Array<{ id: string; title: string; difficulty: string; author: string; created: string; status: string }>>('/admin/problems');
+  if (!rows) return;
+
+  const normalized: AdminProblem[] = rows.map((row) => ({
+    id: row.id,
+    title: row.title,
+    difficulty: row.difficulty === 'Hard' || row.difficulty === 'Medium' ? row.difficulty : 'Easy',
+    author: row.author || 'Admin',
+    created: row.created || 'N/A',
+    status: row.status === 'Draft' ? 'Draft' : 'Published',
+    description: 'Managed from Spring Boot backend',
+    inputFormat: 'N/A',
+    outputFormat: 'N/A',
+    constraints: 'N/A',
+    testCases: [],
+  }));
+
+  writeStore(KEY_PROBLEMS, normalized);
+}
+
+async function refreshContestsFromBackend(): Promise<void> {
+  const rows = await requestFromBackend<Array<{ id: string; title: string; startAt: string; durationMinutes: number; participants: number; status: string }>>('/admin/contests');
+  if (!rows) return;
+
+  const normalized: AdminContest[] = rows.map((row) => ({
+    id: row.id,
+    title: row.title,
+    startAt: row.startAt,
+    durationMinutes: Math.max(15, Math.round(row.durationMinutes || 120)),
+    problemIds: [],
+    participants: Number.isFinite(row.participants) ? row.participants : 0,
+    status: row.status === 'Live' || row.status === 'Completed' ? row.status : 'Upcoming',
+  }));
+
+  writeStore(KEY_CONTESTS, normalized);
+}
+
+async function refreshAnalyticsFromBackend(): Promise<void> {
+  const snapshot = await requestFromBackend<AnalyticsSnapshot>('/admin/analytics');
+  if (!snapshot) return;
+  writeStore(KEY_ANALYTICS_CACHE, snapshot);
+}
+
+function bootstrapBackendCache(): void {
+  if (backendBootstrapStarted || typeof window === 'undefined') {
+    return;
+  }
+  backendBootstrapStarted = true;
+
+  fireAndForget((async () => {
+    await Promise.all([
+      refreshUsersFromBackend(),
+      refreshCoursesFromBackend(),
+      refreshProblemsFromBackend(),
+      refreshContestsFromBackend(),
+      refreshAnalyticsFromBackend(),
+    ]);
+    notifyDataRefreshed();
+  })());
+}
 
 const userSeed: AdminUser[] = [
   { id: 'USR-1001', name: 'Alex Student', email: 'alex@example.com', role: 'Student', status: 'Active', joinedOn: 'Jan 03, 2026' },
@@ -561,6 +718,7 @@ const userActivitySeed: Record<string, AdminUserActivity[]> = {
 };
 
 export function getUsers(): AdminUser[] {
+  bootstrapBackendCache();
   return readStore(KEY_USERS, userSeed);
 }
 
@@ -613,6 +771,15 @@ export function createUser(payload: { name: string; email: string; role: UserRol
   };
   list.unshift(createdUser);
   writeStore(KEY_USERS, list);
+  fireAndForget(requestFromBackend('/admin/users', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: createdUser.name,
+      email: createdUser.email,
+      role: createdUser.role,
+      joinedOn: createdUser.joinedOn,
+    }),
+  }).then(() => refreshUsersFromBackend()));
   appendUserActivity(createdUser.id, 'SYSTEM', `User account created for ${createdUser.name}`);
   return list;
 }
@@ -630,6 +797,19 @@ export function updateUserDetails(userId: string, payload: { name: string; email
     };
   });
   writeStore(KEY_USERS, updated);
+  const current = updated.find((item) => item.id === userId);
+  if (current) {
+    fireAndForget(requestFromBackend(`/admin/users/${userId}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        name: payload.name,
+        email: payload.email,
+        role: payload.role,
+        status: current.status,
+        joinedOn: current.joinedOn,
+      }),
+    }).then(() => refreshUsersFromBackend()));
+  }
   appendUserActivity(userId, 'PROFILE_UPDATE', `Profile updated to ${payload.name} (${payload.role})`);
   return updated;
 }
@@ -653,6 +833,9 @@ export function toggleUserStatus(id: string): AdminUser[] {
 export function deleteUser(id: string): AdminUser[] {
   const updated = getUsers().filter((item) => item.id !== id);
   writeStore(KEY_USERS, updated);
+  fireAndForget(requestFromBackend(`/admin/users/${id}`, {
+    method: 'DELETE',
+  }).then(() => refreshUsersFromBackend()));
   const activityMap = getUserActivityMap();
   delete activityMap[id];
   writeUserActivityMap(activityMap);
@@ -660,6 +843,7 @@ export function deleteUser(id: string): AdminUser[] {
 }
 
 export function getCourses(): AdminCourse[] {
+  bootstrapBackendCache();
   return readStore(KEY_COURSES, courseSeed);
 }
 
@@ -683,6 +867,14 @@ export function createCourse(payload: { title: string; level: CourseLevel; video
     articles: payload.articles || [],
   });
   writeStore(KEY_COURSES, list);
+  fireAndForget(requestFromBackend('/admin/courses', {
+    method: 'POST',
+    body: JSON.stringify({
+      title: payload.title,
+      level: payload.level,
+      status: 'Draft',
+    }),
+  }).then(() => refreshCoursesFromBackend()));
   return list;
 }
 
@@ -726,6 +918,7 @@ export function deleteCourse(id: string): AdminCourse[] {
 }
 
 export function getProblems(): AdminProblem[] {
+  bootstrapBackendCache();
   return readStore(KEY_PROBLEMS, problemSeed);
 }
 
@@ -757,6 +950,16 @@ export function createProblem(payload: {
     testCases: payload.testCases,
   });
   writeStore(KEY_PROBLEMS, list);
+  fireAndForget(requestFromBackend('/admin/problems', {
+    method: 'POST',
+    body: JSON.stringify({
+      title: payload.title,
+      difficulty: payload.difficulty,
+      author: 'Admin',
+      created: new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }),
+      status: 'Draft',
+    }),
+  }).then(() => refreshProblemsFromBackend()));
   return list;
 }
 
@@ -812,6 +1015,7 @@ export function deleteProblem(id: string): AdminProblem[] {
 }
 
 export function getContests(): AdminContest[] {
+  bootstrapBackendCache();
   const raw = readStore<LegacyAdminContest[]>(KEY_CONTESTS, contestSeed);
   const normalized = raw.map((item) => ({
     id: item.id,
@@ -862,6 +1066,14 @@ export function createContest(payload: {
     status: 'Upcoming',
   });
   writeStore(KEY_CONTESTS, list);
+  fireAndForget(requestFromBackend('/admin/contests', {
+    method: 'POST',
+    body: JSON.stringify({
+      title: payload.title,
+      startAt: payload.startAt,
+      durationMinutes: Math.max(15, payload.durationMinutes),
+    }),
+  }).then(() => refreshContestsFromBackend()));
   return list;
 }
 
@@ -1420,16 +1632,13 @@ function normalizeLeaderboard(raw: LegacyLeaderboardEntry[]): LeaderboardEntry[]
     .map((row, index) => ({ ...row, rank: index + 1 }));
 }
 
-export function getAnalyticsSnapshot(): {
-  totalUsers: number;
-  totalProblems: number;
-  activeContests: number;
-  weeklyGrowth: string;
-  dailyActiveUsers: number;
-  solvedCount: number;
-  contestParticipation: number;
-  acceptanceRate: string;
-} {
+export function getAnalyticsSnapshot(): AnalyticsSnapshot {
+  bootstrapBackendCache();
+  const cached = readStore<AnalyticsSnapshot | null>(KEY_ANALYTICS_CACHE, null);
+  if (cached) {
+    return cached;
+  }
+
   const users = getUsers();
   const problems = getProblems();
   const contests = getContests();

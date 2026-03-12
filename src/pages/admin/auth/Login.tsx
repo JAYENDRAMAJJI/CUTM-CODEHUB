@@ -13,12 +13,12 @@ export default function AdminLogin() {
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleSubmit = (event: FormEvent) => {
+  const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
     setErrorMessage('');
     setIsSubmitting(true);
 
-    const result = loginAdmin(email, password);
+    const result = await loginAdmin(email, password);
     if (!result.success) {
       setErrorMessage(result.message || 'Unable to login.');
       setIsSubmitting(false);
@@ -26,6 +26,7 @@ export default function AdminLogin() {
     }
 
     navigate('/admin/dashboard', { replace: true });
+    setIsSubmitting(false);
   };
 
   return (
